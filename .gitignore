@@ -1,0 +1,15 @@
+# Binaries
+loadtest
+loadtest.exe
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go workspace file
+go.work

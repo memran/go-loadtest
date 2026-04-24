@@ -1,29 +1,31 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
 type Config struct {
-	URL         string
-	Requests    int
-	Concurrency int
-	Timeout     int
-	Method      string
-	KeepAlive   bool
-	Insecure    bool
+	URL          string
+	Requests     int
+	Concurrency  int
+	Timeout      int
+	TotalTimeout int
+	Method       string
+	KeepAlive    bool
+	Insecure     bool
 }
 
 type Metrics struct {
-	TotalRequests int64
 	SuccessCount  int64
 	FailCount     int64
 	TotalDuration time.Duration
@@ -32,11 +34,15 @@ type Metrics struct {
 
 func main() {
 	config := parseFlags()
-	
+
 	fmt.Printf("🚀 Starting HTTP Load Test\n")
 	fmt.Printf("📝 URL: %s\n", config.URL)
 	fmt.Printf("🔢 Requests: %d, Concurrency: %d\n", config.Requests, config.Concurrency)
-	fmt.Printf("⏱️  Timeout: %ds, Method: %s\n\n", config.Timeout, config.Method)
+	fmt.Printf("⏱️  Timeout: %ds, Method: %s\n", config.Timeout, config.Method)
+	if config.TotalTimeout > 0 {
+		fmt.Printf("⏱️  Total Test Timeout: %ds\n", config.TotalTimeout)
+	}
+	fmt.Println()
 
 	metrics := &Metrics{
 		StartTime: time.Now(),
@@ -56,15 +62,60 @@ func parseFlags() *Config {
 	flag.IntVar(&config.Requests, "requests", 100, "Number of requests")
 	flag.IntVar(&config.Concurrency, "concurrency", 10, "Number of concurrent requests")
 	flag.IntVar(&config.Timeout, "timeout", 30, "Request timeout in seconds")
+	flag.IntVar(&config.TotalTimeout, "total-timeout", 0, "Total test timeout in seconds (0 for no timeout)")
 	flag.StringVar(&config.Method, "method", "GET", "HTTP method")
 	flag.BoolVar(&config.KeepAlive, "keepalive", true, "Use HTTP keep-alive")
 	flag.BoolVar(&config.Insecure, "insecure", false, "Skip TLS verification")
 
 	flag.Parse()
+
+	// Validate and normalize inputs
+	config.Method = strings.ToUpper(config.Method)
+
+	// Validate HTTP method
+	validMethods := map[string]bool{
+		"GET": true, "POST": true, "PUT": true, "DELETE": true, "PATCH": true, "HEAD": true,
+	}
+	if !validMethods[config.Method] {
+		log.Fatalf("Invalid HTTP method: %s. Allowed methods: GET, POST, PUT, DELETE, PATCH, HEAD", config.Method)
+	}
+
+	// Validate URL
+	if config.URL == "" {
+		log.Fatal("URL is required")
+	}
+	if !strings.HasPrefix(config.URL, "http://") && !strings.HasPrefix(config.URL, "https://") {
+		log.Fatalf("Invalid URL: %s. URL must start with http:// or https://", config.URL)
+	}
+
+	// Validate numeric parameters
+	if config.Requests <= 0 {
+		log.Fatal("Requests must be a positive integer")
+	}
+	if config.Concurrency <= 0 {
+		log.Fatal("Concurrency must be a positive integer")
+	}
+	if config.Timeout <= 0 {
+		log.Fatal("Request timeout must be a positive integer")
+	}
+	if config.TotalTimeout < 0 {
+		log.Fatal("Total timeout must be non-negative")
+	}
+
 	return config
 }
 
 func runLoadTest(config *Config, metrics *Metrics) {
+	// Create context for overall timeout
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if config.TotalTimeout > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(config.TotalTimeout)*time.Second)
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
+	defer cancel()
+
 	// Create HTTP client
 	client := createHTTPClient(config)
 
@@ -78,10 +129,17 @@ func runLoadTest(config *Config, metrics *Metrics) {
 	var counter int64
 
 	// Start progress reporter
-	go reportProgress(metrics, config.Requests, &counter)
+	done := make(chan struct{})
+	defer close(done)
+	go reportProgress(metrics, config.Requests, &counter, ctx, done)
 
 	// Send requests
 	for i := 0; i < config.Requests; i++ {
+		// Check if context is done before starting new request
+		if ctx.Err() != nil {
+			break
+		}
+
 		wg.Add(1)
 		semaphore <- struct{}{} // Acquire semaphore
 
@@ -89,13 +147,31 @@ func runLoadTest(config *Config, metrics *Metrics) {
 			defer wg.Done()
 			defer func() { <-semaphore }() // Release semaphore
 
+			// Check if context is done before making request
+			if ctx.Err() != nil {
+				atomic.AddInt64(&metrics.FailCount, 1)
+				return
+			}
+
 			atomic.AddInt64(&counter, 1)
 			makeRequest(client, config, metrics, requestID)
 		}(i)
 	}
 
-	// Wait for all requests to complete
-	wg.Wait()
+	// Wait for all requests to complete or context to timeout
+	completed := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(completed)
+	}()
+
+	select {
+	case <-completed:
+		// All requests completed
+	case <-ctx.Done():
+		log.Println("🛑 Overall test timeout reached")
+	}
+
 	metrics.TotalDuration = time.Since(metrics.StartTime)
 }
 
@@ -164,21 +240,28 @@ func makeRequest(client *http.Client, config *Config, metrics *Metrics, requestI
 	}
 }
 
-func reportProgress(metrics *Metrics, total int, counter *int64) {
+func reportProgress(metrics *Metrics, total int, counter *int64, ctx context.Context, done <-chan struct{}) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		current := atomic.LoadInt64(counter)
-		if current >= int64(total) {
-			break
-		}
+	for {
+		select {
+		case <-done:
+			return
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			current := atomic.LoadInt64(counter)
+			if current >= int64(total) {
+				return
+			}
 
-		elapsed := time.Since(metrics.StartTime).Seconds()
-		rate := float64(current) / elapsed
-		
-		fmt.Printf("📊 Progress: %d/%d (%.1f%%) - Rate: %.1f req/sec\n", 
-			current, total, float64(current)/float64(total)*100, rate)
+			elapsed := time.Since(metrics.StartTime).Seconds()
+			rate := float64(current) / elapsed
+
+			fmt.Printf("📊 Progress: %d/%d (%.1f%%) - Rate: %.1f req/sec\n",
+				current, total, float64(current)/float64(total)*100, rate)
+		}
 	}
 }
 
@@ -195,24 +278,22 @@ func printResults(config *Config, metrics *Metrics) {
 	fmt.Printf("📊 Total Requests: %d\n", total)
 	fmt.Printf("✅ Successful: %d\n", success)
 	fmt.Printf("❌ Failed: %d\n", fail)
-	fmt.Printf("📈 Success Rate: %.2f%%\n", float64(success)/float64(total)*100)
+
+	// Calculate success rate safely
+	var successRate float64
+	if total > 0 {
+		successRate = float64(success) / float64(total) * 100
+	}
+	fmt.Printf("📈 Success Rate: %.2f%%\n", successRate)
+
 	fmt.Printf("🚀 Requests/Second: %.2f\n", float64(total)/metrics.TotalDuration.Seconds())
 	fmt.Printf("🔀 Concurrency: %d\n", config.Concurrency)
 	fmt.Printf("⚡ Method: %s\n", config.Method)
 	fmt.Printf("🔒 Keep-Alive: %v\n", config.KeepAlive)
+	if config.TotalTimeout > 0 {
+		fmt.Printf("⏱️  Total Timeout: %ds\n", config.TotalTimeout)
+	}
 	fmt.Printf("🔓 Insecure: %v\n", config.Insecure)
 	fmt.Printf("%s\n", strings.Repeat("=", 60))
 }
 
-// Helper string repeat function (since we can't import strings in the basic example)
-var strings = struct {
-	Repeat func(string, int) string
-}{
-	Repeat: func(s string, count int) string {
-		var result string
-		for i := 0; i < count; i++ {
-			result += s
-		}
-		return result
-	},
-}
