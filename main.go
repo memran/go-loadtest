@@ -8,11 +8,15 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// Version information - set at build time via ldflags
+var Version = "dev"
 
 type Config struct {
 	URL          string
@@ -38,6 +42,12 @@ type Metrics struct {
 }
 
 func main() {
+	// Check for version flag
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Printf("go-loadtest version %s\n", Version)
+		return
+	}
+
 	config := parseFlags()
 
 	fmt.Printf("🚀 Starting HTTP Load Test\n")

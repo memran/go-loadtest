@@ -221,6 +221,52 @@ This project is licensed under the MIT License.
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
+## Releases
+
+### Automated Releases (Recommended)
+
+This project uses GitHub Actions for automated cross-platform releases.
+
+**To create a release:**
+
+1. Tag your commit with a version number:
+   ```bash
+   git tag v1.0.0
+   ```
+
+2. Push the tag to GitHub:
+   ```bash
+   git push origin v1.0.0
+   ```
+
+3. GitHub Actions will automatically:
+   - Build binaries for Linux (amd64, arm64), macOS (Intel, Apple Silicon), and Windows (amd64, 386)
+   - Create a GitHub Release
+   - Attach all binaries to the release
+
+### Manual Builds
+
+**Linux/macOS:**
+```bash
+chmod +x build.sh
+./build.sh v1.0.0
+```
+
+**Windows (PowerShell):**
+```powershell
+.\build.ps1 -Version "v1.0.0"
+```
+
+Binaries will be created in the `build/` directory.
+
+### Version Information
+
+Check the version of a built binary:
+```bash
+./go-loadtest --version
+# Output: go-loadtest version v1.0.0
+```
+
 ## Roadmap
 
 - [x] Request body support
