@@ -1,5 +1,11 @@
 # HTTP Load Testing Tool
 
+[![Build Status](https://img.shields.io/github/actions/workflow/status/memran/go-loadtest/release.yml?label=build)](https://github.com/memran/go-loadtest/actions)
+[![Latest Release](https://img.shields.io/github/v/release/memran/go-loadtest)](https://github.com/memran/go-loadtest/releases)
+[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![License](https://img.shields.io/github/license/memran/go-loadtest)](LICENSE)
+[![Downloads](https://img.shields.io/github/downloads/memran/go-loadtest/total)](https://github.com/memran/go-loadtest/releases)
+
 A simple and powerful HTTP load testing tool written in Go. Perform concurrent HTTP load tests against any web endpoint with configurable parameters.
 
 ## Features
