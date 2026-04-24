@@ -116,8 +116,9 @@ func runLoadTest(config *Config, metrics *Metrics) {
 	}
 	defer cancel()
 
-	// Create HTTP client
-	client := createHTTPClient(config)
+	// Create HTTP client and transport
+	client, transport := createHTTPClient(config)
+	defer transport.CloseIdleConnections()
 
 	// Semaphore for controlling concurrency
 	semaphore := make(chan struct{}, config.Concurrency)
@@ -175,7 +176,7 @@ func runLoadTest(config *Config, metrics *Metrics) {
 	metrics.TotalDuration = time.Since(metrics.StartTime)
 }
 
-func createHTTPClient(config *Config) *http.Client {
+func createHTTPClient(config *Config) (*http.Client, *http.Transport) {
 	transport := &http.Transport{
 		MaxIdleConns:        config.Concurrency,
 		MaxIdleConnsPerHost: config.Concurrency,
@@ -186,13 +187,15 @@ func createHTTPClient(config *Config) *http.Client {
 		},
 	}
 
-	return &http.Client{
+	client := &http.Client{
 		Transport: transport,
 		Timeout:   time.Duration(config.Timeout) * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse // Don't follow redirects
 		},
 	}
+
+	return client, transport
 }
 
 func makeRequest(client *http.Client, config *Config, metrics *Metrics, requestID int) {
