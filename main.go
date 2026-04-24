@@ -21,6 +21,10 @@ type Config struct {
 	Timeout      int
 	TotalTimeout int
 	Method       string
+	Body         string
+	AuthUser     string
+	AuthPass     string
+	BearerToken  string
 	KeepAlive    bool
 	Insecure     bool
 }
@@ -30,6 +34,7 @@ type Metrics struct {
 	FailCount     int64
 	TotalDuration time.Duration
 	StartTime     time.Time
+	loggedCount   int64 // Track how many requests we've logged
 }
 
 func main() {
@@ -41,6 +46,15 @@ func main() {
 	fmt.Printf("⏱️  Timeout: %ds, Method: %s\n", config.Timeout, config.Method)
 	if config.TotalTimeout > 0 {
 		fmt.Printf("⏱️  Total Test Timeout: %ds\n", config.TotalTimeout)
+	}
+	if config.Body != "" {
+		fmt.Printf("📦 Body: %s\n", config.Body)
+	}
+	if config.AuthUser != "" {
+		fmt.Printf("🔐 Auth: Basic (%s)\n", config.AuthUser)
+	}
+	if config.BearerToken != "" {
+		fmt.Printf("🔐 Auth: Bearer token\n")
 	}
 	fmt.Println()
 
@@ -64,6 +78,10 @@ func parseFlags() *Config {
 	flag.IntVar(&config.Timeout, "timeout", 30, "Request timeout in seconds")
 	flag.IntVar(&config.TotalTimeout, "total-timeout", 0, "Total test timeout in seconds (0 for no timeout)")
 	flag.StringVar(&config.Method, "method", "GET", "HTTP method")
+	flag.StringVar(&config.Body, "body", "", "Request body (for POST/PUT/PATCH)")
+	flag.StringVar(&config.AuthUser, "auth-user", "", "Username for basic authentication")
+	flag.StringVar(&config.AuthPass, "auth-pass", "", "Password for basic authentication")
+	flag.StringVar(&config.BearerToken, "bearer-token", "", "Bearer token for authentication")
 	flag.BoolVar(&config.KeepAlive, "keepalive", true, "Use HTTP keep-alive")
 	flag.BoolVar(&config.Insecure, "insecure", false, "Skip TLS verification")
 
@@ -100,6 +118,16 @@ func parseFlags() *Config {
 	}
 	if config.TotalTimeout < 0 {
 		log.Fatal("Total timeout must be non-negative")
+	}
+
+	// Validate body is only used with appropriate methods
+	if config.Body != "" && (config.Method == "GET" || config.Method == "HEAD" || config.Method == "DELETE") {
+		log.Fatalf("Request body is not typically used with %s method", config.Method)
+	}
+
+	// Validate authentication options
+	if config.AuthUser != "" && config.BearerToken != "" {
+		log.Fatal("Cannot use both basic auth and bearer token authentication")
 	}
 
 	return config
@@ -201,10 +229,19 @@ func createHTTPClient(config *Config) (*http.Client, *http.Transport) {
 func makeRequest(client *http.Client, config *Config, metrics *Metrics, requestID int) {
 	startTime := time.Now()
 
+	// Create request body if provided
+	var body io.Reader
+	if config.Body != "" {
+		body = strings.NewReader(config.Body)
+	}
+
 	// Create request
-	req, err := http.NewRequest(config.Method, config.URL, nil)
+	req, err := http.NewRequest(config.Method, config.URL, body)
 	if err != nil {
-		log.Printf("❌ Request %d: Failed to create request: %v", requestID, err)
+		// Log first 10 request creation errors
+		if atomic.AddInt64(&metrics.loggedCount, 1) <= 10 {
+			log.Printf("❌ Request %d: Failed to create request: %v", requestID, err)
+		}
 		atomic.AddInt64(&metrics.FailCount, 1)
 		return
 	}
@@ -212,13 +249,26 @@ func makeRequest(client *http.Client, config *Config, metrics *Metrics, requestI
 	// Set headers
 	req.Header.Set("User-Agent", "Go-HTTP-Load-Tester/1.0")
 	req.Header.Set("Accept", "*/*")
+	if config.Body != "" && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	// Add authentication
+	if config.AuthUser != "" {
+		req.SetBasicAuth(config.AuthUser, config.AuthPass)
+	}
+	if config.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+config.BearerToken)
+	}
 
 	// Make request
 	resp, err := client.Do(req)
 	duration := time.Since(startTime)
 
 	if err != nil {
-		if requestID%100 == 0 { // Log only some errors to avoid spam
+		// Log errors: first 10, then every 100th
+		logCount := atomic.AddInt64(&metrics.loggedCount, 1)
+		if logCount <= 10 || logCount%100 == 0 {
 			log.Printf("❌ Request %d: Error: %v (%.2fms)", requestID, err, duration.Seconds()*1000)
 		}
 		atomic.AddInt64(&metrics.FailCount, 1)
@@ -232,12 +282,16 @@ func makeRequest(client *http.Client, config *Config, metrics *Metrics, requestI
 	// Check if successful
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		atomic.AddInt64(&metrics.SuccessCount, 1)
-		if requestID%100 == 0 { // Log only some successes
+		// Log successes: first 10, then every 100th
+		logCount := atomic.LoadInt64(&metrics.SuccessCount)
+		if logCount <= 10 || logCount%100 == 0 {
 			log.Printf("✅ Request %d: Status %d (%.2fms)", requestID, resp.StatusCode, duration.Seconds()*1000)
 		}
 	} else {
 		atomic.AddInt64(&metrics.FailCount, 1)
-		if requestID%50 == 0 { // Log more failed requests
+		// Log failures: first 10, then every 50th
+		failCount := atomic.LoadInt64(&metrics.FailCount)
+		if failCount <= 10 || failCount%50 == 0 {
 			log.Printf("⚠️ Request %d: Status %d (%.2fms)", requestID, resp.StatusCode, duration.Seconds()*1000)
 		}
 	}
