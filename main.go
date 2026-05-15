@@ -38,7 +38,6 @@ type Metrics struct {
 	FailCount     int64
 	TotalDuration time.Duration
 	StartTime     time.Time
-	loggedCount   int64 // Track how many requests we've logged
 }
 
 func main() {
@@ -144,7 +143,6 @@ func parseFlags() *Config {
 }
 
 func runLoadTest(config *Config, metrics *Metrics) {
-	// Create context for overall timeout
 	ctx := context.Background()
 	var cancel context.CancelFunc
 	if config.TotalTimeout > 0 {
@@ -154,50 +152,45 @@ func runLoadTest(config *Config, metrics *Metrics) {
 	}
 	defer cancel()
 
-	// Create HTTP client and transport
 	client, transport := createHTTPClient(config)
 	defer transport.CloseIdleConnections()
 
-	// Semaphore for controlling concurrency
-	semaphore := make(chan struct{}, config.Concurrency)
-
-	// Wait group to wait for all requests
-	var wg sync.WaitGroup
-
-	// Progress tracking
 	var counter int64
 
-	// Start progress reporter
+	// Worker pool - fixed number of goroutines
+	jobs := make(chan int, config.Concurrency)
+	var wg sync.WaitGroup
+
+	for i := 0; i < config.Concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range jobs {
+				atomic.AddInt64(&counter, 1)
+				makeRequest(client, config, metrics)
+			}
+		}()
+	}
+
+	// Send jobs
+	go func() {
+		for i := 0; i < config.Requests; i++ {
+			select {
+			case jobs <- i:
+			case <-ctx.Done():
+				close(jobs)
+				return
+			}
+		}
+		close(jobs)
+	}()
+
+	// Progress reporter
 	done := make(chan struct{})
 	defer close(done)
 	go reportProgress(metrics, config.Requests, &counter, ctx, done)
 
-	// Send requests
-	for i := 0; i < config.Requests; i++ {
-		// Check if context is done before starting new request
-		if ctx.Err() != nil {
-			break
-		}
-
-		wg.Add(1)
-		semaphore <- struct{}{} // Acquire semaphore
-
-		go func(requestID int) {
-			defer wg.Done()
-			defer func() { <-semaphore }() // Release semaphore
-
-			// Check if context is done before making request
-			if ctx.Err() != nil {
-				atomic.AddInt64(&metrics.FailCount, 1)
-				return
-			}
-
-			atomic.AddInt64(&counter, 1)
-			makeRequest(client, config, metrics, requestID)
-		}(i)
-	}
-
-	// Wait for all requests to complete or context to timeout
+	// Wait for all workers to finish or context to timeout
 	completed := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -206,7 +199,6 @@ func runLoadTest(config *Config, metrics *Metrics) {
 
 	select {
 	case <-completed:
-		// All requests completed
 	case <-ctx.Done():
 		log.Println("🛑 Overall test timeout reached")
 	}
@@ -216,8 +208,8 @@ func runLoadTest(config *Config, metrics *Metrics) {
 
 func createHTTPClient(config *Config) (*http.Client, *http.Transport) {
 	transport := &http.Transport{
-		MaxIdleConns:        config.Concurrency,
-		MaxIdleConnsPerHost: config.Concurrency,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
 		IdleConnTimeout:     90 * time.Second,
 		DisableKeepAlives:   !config.KeepAlive,
 		TLSClientConfig: &tls.Config{
@@ -236,34 +228,24 @@ func createHTTPClient(config *Config) (*http.Client, *http.Transport) {
 	return client, transport
 }
 
-func makeRequest(client *http.Client, config *Config, metrics *Metrics, requestID int) {
-	startTime := time.Now()
-
-	// Create request body if provided
+func makeRequest(client *http.Client, config *Config, metrics *Metrics) {
 	var body io.Reader
 	if config.Body != "" {
 		body = strings.NewReader(config.Body)
 	}
 
-	// Create request
 	req, err := http.NewRequest(config.Method, config.URL, body)
 	if err != nil {
-		// Log first 10 request creation errors
-		if atomic.AddInt64(&metrics.loggedCount, 1) <= 10 {
-			log.Printf("❌ Request %d: Failed to create request: %v", requestID, err)
-		}
 		atomic.AddInt64(&metrics.FailCount, 1)
 		return
 	}
 
-	// Set headers
 	req.Header.Set("User-Agent", "Go-HTTP-Load-Tester/1.0")
 	req.Header.Set("Accept", "*/*")
 	if config.Body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	// Add authentication
 	if config.AuthUser != "" {
 		req.SetBasicAuth(config.AuthUser, config.AuthPass)
 	}
@@ -271,39 +253,19 @@ func makeRequest(client *http.Client, config *Config, metrics *Metrics, requestI
 		req.Header.Set("Authorization", "Bearer "+config.BearerToken)
 	}
 
-	// Make request
 	resp, err := client.Do(req)
-	duration := time.Since(startTime)
-
 	if err != nil {
-		// Log errors: first 10, then every 100th
-		logCount := atomic.AddInt64(&metrics.loggedCount, 1)
-		if logCount <= 10 || logCount%100 == 0 {
-			log.Printf("❌ Request %d: Error: %v (%.2fms)", requestID, err, duration.Seconds()*1000)
-		}
 		atomic.AddInt64(&metrics.FailCount, 1)
 		return
 	}
 	defer resp.Body.Close()
 
-	// Read response body (but discard it)
 	_, _ = io.Copy(io.Discard, resp.Body)
 
-	// Check if successful
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		atomic.AddInt64(&metrics.SuccessCount, 1)
-		// Log successes: first 10, then every 100th
-		logCount := atomic.LoadInt64(&metrics.SuccessCount)
-		if logCount <= 10 || logCount%100 == 0 {
-			log.Printf("✅ Request %d: Status %d (%.2fms)", requestID, resp.StatusCode, duration.Seconds()*1000)
-		}
 	} else {
 		atomic.AddInt64(&metrics.FailCount, 1)
-		// Log failures: first 10, then every 50th
-		failCount := atomic.LoadInt64(&metrics.FailCount)
-		if failCount <= 10 || failCount%50 == 0 {
-			log.Printf("⚠️ Request %d: Status %d (%.2fms)", requestID, resp.StatusCode, duration.Seconds()*1000)
-		}
 	}
 }
 

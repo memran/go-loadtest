@@ -48,13 +48,13 @@ The application follows a simple structure:
 1. **Configuration** (`Config` struct): Parses command-line flags to configure the test
 2. **Metrics collection** (`Metrics` struct): Tracks request success/failure counts and timing
 3. **HTTP client management** (`createHTTPClient`): Configures a reusable HTTP client with proper connection pooling
-4. **Concurrency control**: Uses a semaphore pattern to limit concurrent requests
+4. **Concurrency control**: Uses a fixed worker pool pattern with buffered job channel
 5. **Progress reporting**: Real-time progress updates every 2 seconds
 6. **Request execution** (`makeRequest`): Individual HTTP request handling with response status tracking
 
 ### Key Design Patterns
 
-- **Semaphore pattern**: Controls concurrency using buffered channels
+- **Worker pool**: Fixed set of goroutines pull jobs from a buffered channel — avoids creating a goroutine per request
 - **Atomic counters**: Thread-safe metrics collection using `sync/atomic`
 - **Progress reporting**: Separate goroutine for periodic progress updates
 - **Connection pooling**: Reuses HTTP connections for performance
@@ -62,10 +62,9 @@ The application follows a simple structure:
 
 ### Important Implementation Details
 
-- The application uses a custom string repeat function to avoid importing the `strings` package (demonstrating minimal dependency approach)
 - HTTP redirects are disabled by default (`http.ErrUseLastResponse`)
 - Response bodies are discarded but fully read to ensure proper connection reuse
-- Error logging is throttled to prevent spam (every 100th error, every 50th failure, every 100th success)
+- Error logging is throttled to prevent spam (every 1000th error, every 500th failure, every 1000th success)
 - The application tracks both success (2xx) and failure (non-2xx) status codes
 
 ## Testing

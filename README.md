@@ -43,6 +43,12 @@ go run main.go --help
 go run main.go -url https://httpbin.org/get -requests 100 -concurrency 10
 ```
 
+### Large Scale Test (10K Requests, Low Concurrency)
+
+```bash
+go run main.go -url https://httpbin.org/get -requests 10000 -concurrency 10 -timeout 30
+```
+
 ### High Concurrency Test
 
 ```bash
@@ -70,12 +76,13 @@ go run main.go -url https://httpbin.org/bearer \
   -bearer-token "your-token-here" -requests 100 -concurrency 10
 ```
 
-### Test with Overall Timeout
+### Per-Request vs Overall Timeout
 
 ```bash
-# Stop the entire test after 30 seconds, regardless of pending requests
+# -timeout: max wait per individual HTTP request (30s)
+# -total-timeout: max duration for the entire test (60s), aborts pending requests
 go run main.go -url https://api.example.com -requests 10000 \
-  -concurrency 100 -total-timeout 30
+  -concurrency 100 -timeout 30 -total-timeout 60
 ```
 
 ### Test with Insecure SSL (Development Only)
@@ -98,8 +105,8 @@ go run main.go -url https://example.com -keepalive=false -requests 100 -concurre
 | `-url` | URL to test | `https://httpbin.org/get` |
 | `-requests` | Number of requests | `100` |
 | `-concurrency` | Number of concurrent requests | `10` |
-| `-timeout` | Request timeout in seconds | `30` |
-| `-total-timeout` | Total test timeout in seconds (0 for no timeout) | `0` |
+| `-timeout` | Per-request timeout in seconds | `30` |
+| `-total-timeout` | Overall test timeout in seconds (0 = no limit, aborts all pending requests) | `0` |
 | `-method` | HTTP method (GET, POST, PUT, DELETE, PATCH, HEAD) | `GET` |
 | `-body` | Request body (for POST/PUT/PATCH) | `` |
 | `-auth-user` | Username for basic authentication | `` |
@@ -208,12 +215,12 @@ The tool validates all inputs before starting the test:
 
 ## Logging Strategy
 
-The tool uses smart logging to avoid output spam:
+The tool uses smart logging to avoid output spam at scale:
 
 - First 10 requests (success or failure) are always logged
-- Successful requests: logged every 100th request after the first 10
-- Failed requests (non-2xx): logged every 50th request
-- Network errors: logged every 100th error
+- Successful requests: logged every 1000th request after the first 10
+- Failed requests (non-2xx): logged every 500th request
+- Network errors: logged every 1000th error
 
 ## License
 
